@@ -16,8 +16,7 @@ on:
         required: false
         default: "Ajoute orchestrateur v3 (merge auto), menu d'installation (scripts/install.sh|.ps1), Makefile, finalize-v3-release.yml et maj README/notes."
 
-# Forcer les actions JS à s'exécuter avec Node 24 dès maintenant (prépare la transition 2026)
-# GitHub annonce la bascule Node24 par défaut au 2 juin 2026 + retrait de Node20 ensuite. [2](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)
+# Test Node 24 dès maintenant (GitHub bascule vers Node 24 par défaut en 2026). [1](https://stackoverflow.com/questions/77992218/github-actions-failing-after-upgrading-to-node-v20)
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -33,6 +32,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Ensure folders
         shell: bash
@@ -70,12 +70,12 @@ jobs:
                   required: true
                   default: "3.0.0"
 
+          env:
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
           permissions:
             contents: write
             pull-requests: write
-
-          env:
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
           jobs:
             orchestrate:
@@ -85,6 +85,7 @@ jobs:
                   uses: actions/checkout@v5
                   with:
                     fetch-depth: 0
+                    persist-credentials: true
 
                 - name: Configure git
                   run: |
@@ -153,8 +154,9 @@ jobs:
                     git commit -m "chore(v3): bump version to ${{ inputs.version }} + notes"
 
                 - name: Create PR release/v3 -> main
-                  uses: peter-evans/create-pull-request@v6
+                  uses: peter-evans/create-pull-request@v8
                   with:
+                    token: ${{ secrets.GITHUB_TOKEN }}
                     branch: ${{ inputs.release_branch }}
                     title: "release: v${{ inputs.version }} (merge branches)"
                     body: |
@@ -187,11 +189,11 @@ jobs:
                   required: true
                   default: "3.1.0"
 
-          permissions:
-            contents: write
-
           env:
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+          permissions:
+            contents: write
 
           jobs:
             finalize:
@@ -201,6 +203,7 @@ jobs:
                   uses: actions/checkout@v5
                   with:
                     fetch-depth: 0
+                    persist-credentials: true
 
                 - name: Create tag
                   run: |
@@ -210,7 +213,7 @@ jobs:
           YAML
 
       # -------------------------
-      # (C) Menu install.sh (Bash) + chmod +x
+      # (C) Menu install.sh + chmod +x
       # -------------------------
       - name: Write scripts/install.sh
         shell: bash
@@ -311,16 +314,15 @@ jobs:
 
       - name: Make install.sh executable
         shell: bash
-        run: |
-          chmod +x scripts/install.sh
-          git add scripts/install.sh
+        run: chmod +x scripts/install.sh
 
       # -------------------------
-      # (G) Create Pull Request
+      # (D) Create Pull Request (v8 + token explicite)
       # -------------------------
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ inputs.pr-branch }}
           title: ${{ inputs.pr-title }}
           body: ${{ inputs.pr-body }}
