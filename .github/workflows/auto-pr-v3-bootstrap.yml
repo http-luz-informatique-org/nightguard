@@ -24,10 +24,12 @@ jobs:
   bootstrap-v3:
     runs-on: ubuntu-latest
     steps:
+   
     - uses: actions/checkout@v5
-    with: { fetch-depth: 0 }
-
-      - name: Ensure folders
+  with:
+    fetch-depth: 0
+   
+    - name: Ensure folders
         shell: bash
         run: |
           mkdir -p .github/workflows
