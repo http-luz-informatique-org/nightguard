@@ -189,7 +189,7 @@ jobs:
             finalize:
               runs-on: ubuntu-latest
               steps:
-                - uses: actions/checkout@v4
+                - uses: actions/checkout@v5
                   with: { fetch-depth: 0 }
                 - name: Ensure version
                   id: ver
@@ -309,8 +309,11 @@ jobs:
           BASH
 
       - name: Make install.sh executable
-        shell: bash
-        run: git update-index --chmod=+x scripts/install.sh
+      shell: bash
+      run: |
+        chmod +x scripts/install.sh
+        git add scripts/install.sh
+
 
       # -------------------------
       # (D) Menu install.ps1 (Windows)
