@@ -16,6 +16,11 @@ on:
         required: false
         default: "Ajoute orchestrateur v3 (merge auto), menu d'installation (scripts/install.sh|.ps1), Makefile, finalize-v3-release.yml et maj README/notes."
 
+# Forcer les actions JS à s'exécuter avec Node 24 dès maintenant (prépare la transition 2026)
+# GitHub annonce la bascule Node24 par défaut au 2 juin 2026 + retrait de Node20 ensuite. [2](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write
   pull-requests: write
@@ -24,12 +29,12 @@ jobs:
   bootstrap-v3:
     runs-on: ubuntu-latest
     steps:
-   
-    - uses: actions/checkout@v5
-  with:
-    fetch-depth: 0
-   
-    - name: Ensure folders
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Ensure folders
         shell: bash
         run: |
           mkdir -p .github/workflows
@@ -69,12 +74,15 @@ jobs:
             contents: write
             pull-requests: write
 
+          env:
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
           jobs:
             orchestrate:
               runs-on: ubuntu-latest
               steps:
-                - name: Checkout (full history)
-                  uses: actions/checkout@v4
+                - name: Checkout
+                  uses: actions/checkout@v5
                   with:
                     fetch-depth: 0
 
@@ -108,11 +116,11 @@ jobs:
                     done
                     echo "conflict=false" >> $GITHUB_OUTPUT
 
-                - name: Mark PR with conflict label (if needed)
+                - name: Mark conflicts (if needed)
                   if: steps.merge.outputs.conflict == 'true'
                   run: |
                     echo "::warning::Merge conflicts detected. Opening PR for manual resolution."
-                    touch .merge-conflicts.txt
+                    echo "Resolve conflicts in this PR branch." > .merge-conflicts.txt
                     git add .merge-conflicts.txt
                     git commit -m "chore(v3): mark conflicts for manual resolution"
 
@@ -154,10 +162,8 @@ jobs:
 
                       - Merge order: `${{ inputs.branches }}`
                       - Version bump: `${{ inputs.version }}`
-                      - Added: `scripts/install.sh` (voir PR fichiers) si présent
-                      - Changelog & release notes mis à jour
 
-                      Si des **conflits** sont présents, un fichier `.merge-conflicts.txt` a été ajouté pour signalement ; merci de les résoudre puis de re-pousser.
+                      If conflicts exist, resolve them then push updates.
                     labels: ${{ steps.merge.outputs.conflict == 'true' && 'needs-conflict-resolution' || 'release' }}
                     commit-message: "chore(v3): open integration PR for v${{ inputs.version }}"
                     signoff: false
@@ -174,44 +180,37 @@ jobs:
           name: Finalize v3 Release
 
           on:
-            workflow_run:
-              workflows: ["Orchestrate v3 (merge all branches -> release/v3)"]
-              types: [completed]
             workflow_dispatch:
               inputs:
                 version:
-                  description: "Version (e.g. 3.0.0)"
+                  description: "Version (e.g. 3.1.0)"
                   required: true
-                  default: "3.0.0"
+                  default: "3.1.0"
 
           permissions:
             contents: write
+
+          env:
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
           jobs:
             finalize:
               runs-on: ubuntu-latest
               steps:
-                - uses: actions/checkout@v5
-                  with: { fetch-depth: 0 }
-                - name: Ensure version
-                  id: ver
+                - name: Checkout
+                  uses: actions/checkout@v5
+                  with:
+                    fetch-depth: 0
+
+                - name: Create tag
                   run: |
                     V="${{ inputs.version }}"
-                    if [ -z "$V" ]; then
-                      if [ -f VERSION ]; then V="$(cat VERSION)"; else V="3.0.0"; fi
-                    fi
-                    echo "v=$V" >> $GITHUB_OUTPUT
-                - name: Create tag vX.Y.Z
-                  run: |
-                    V="${{ steps.ver.outputs.v }}"
                     git tag "v$V" || true
                     git push origin "v$V"
-                - name: (Optional) Trigger existing Release pipeline
-                  run: echo "Le pipeline release-demo.yml se lancera si configuré sur tags."
           YAML
 
       # -------------------------
-      # (C) Menu install.sh (Bash)
+      # (C) Menu install.sh (Bash) + chmod +x
       # -------------------------
       - name: Write scripts/install.sh
         shell: bash
@@ -311,129 +310,10 @@ jobs:
           BASH
 
       - name: Make install.sh executable
-      shell: bash
-      run: |
-        chmod +x scripts/install.sh
-        git add scripts/install.sh
-
-
-      # -------------------------
-      # (D) Menu install.ps1 (Windows)
-      # -------------------------
-      - name: Write scripts/install.ps1
         shell: bash
         run: |
-          cat > scripts/install.ps1 <<'PS1'
-          param(
-            [ValidateSet("api","laravel","both")] [string]$stack = "both",
-            [ValidateSet("sqlite","mysql")]       [string]$db    = "sqlite"
-          )
-
-          function Info($m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
-          function Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
-          function Err ($m){ Write-Host "[ERR]  $m" -ForegroundColor Red }
-
-          function Setup-Api {
-            Info "Config API…"
-            Push-Location "apps/api"
-            if ($db -eq "sqlite") {
-              Copy-Item ".env.sqlite.example" ".env" -Force -ErrorAction SilentlyContinue
-              $env:DB_SQLITE_FILE = "./data/dev.sqlite"
-              npm run -s db:ensure-sqlite
-              npm run -s db:migrate:sqlite
-            } else {
-              Copy-Item ".env.example" ".env" -Force -ErrorAction SilentlyContinue
-              Warn "Vérifie DB_* dans apps/api/.env"
-              npm run -s db:migrate 2>$null
-            }
-            npm install --silent
-            npm run -s build
-            Pop-Location
-          }
-
-          function Setup-Laravel {
-            Info "Config Laravel…"
-            Push-Location "apps/laravel-web"
-            Copy-Item ".env.example" ".env" -Force -ErrorAction SilentlyContinue
-            if ($db -eq "sqlite") {
-              Copy-Item ".env.sqlite.example" ".env" -Force -ErrorAction SilentlyContinue
-              New-Item -ItemType File "database/database.sqlite" -Force | Out-Null
-            }
-            composer install --no-interaction --prefer-dist
-            php artisan key:generate --force
-            php artisan migrate --force
-            npm install --silent
-            npm run -s build
-            Pop-Location
-          }
-
-          switch ($stack) {
-            "api"     { Setup-Api }
-            "laravel" { Setup-Laravel }
-            "both"    { Setup-Api; Setup-Laravel }
-          }
-
-          Info "OK. API: http://127.0.0.1:8080  Laravel: http://127.0.0.1:8000"
-          PS1
-
-      # -------------------------
-      # (E) Makefile (raccourcis)
-      # -------------------------
-      - name: Write Makefile
-        shell: bash
-        run: |
-          cat > Makefile <<'MAKE'
-          .PHONY: install api laravel up clean
-
-          install:
-              ./scripts/install.sh
-
-          api:
-              cd apps/api && npm i && npm run build && NODE_ENV=production PORT=8080 node dist/server.js
-
-          laravel:
-              cd apps/laravel-web && composer install --no-interaction --prefer-dist && php artisan key:generate --force && php artisan migrate --force && php artisan serve --host 127.0.0.1 --port 8000
-
-          up: api laravel
-
-          clean:
-              find . -name "node_modules" -type d -prune -exec rm -rf {} \; || true
-          MAKE
-
-      # -------------------------
-      # (F) README quick start (append if not present)
-      # -------------------------
-      - name: Append Quick Start to README
-        shell: bash
-        run: |
-          if [ -f README.md ]; then
-            grep -qi "Démarrage rapide (v3)" README.md || cat >> README.md <<'MD'
-
-          ---
-          ## Démarrage rapide (v3)
-          ```bash
-          # Linux/macOS
           chmod +x scripts/install.sh
-          ./scripts/install.sh
-          # Windows (PowerShell 7+)
-          pwsh -File scripts/install.ps1 -stack both -db sqlite
-          ```
-          - API (Node) : http://127.0.0.1:8080 (`/health`, `/ready`)
-          - Laravel : http://127.0.0.1:8000 (`/up`, `/health`, `/ready`)
-          MD
-          else
-            cat > README.md <<'MD'
-          # Nightwatch
-
-          ## Démarrage rapide (v3)
-          ```bash
-          chmod +x scripts/install.sh
-          ./scripts/install.sh
-          ```
-          - API (Node) : http://127.0.0.1:8080
-          - Laravel : http://127.0.0.1:8000
-          MD
-          fi
+          git add scripts/install.sh
 
       # -------------------------
       # (G) Create Pull Request
@@ -442,8 +322,108 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           branch: ${{ inputs.pr-branch }}
-          title:  ${{ inputs.pr-title }}
-          body:   ${{ inputs.pr-body }}
+          title: ${{ inputs.pr-title }}
+          body: ${{ inputs.pr-body }}
           commit-message: "chore(v3): add orchestrate workflows + installers + Makefile + README quickstart"
           signoff: false
           delete-branch: false
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+          
