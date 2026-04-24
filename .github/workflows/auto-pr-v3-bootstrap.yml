@@ -1,0 +1,444 @@
+name: Auto PR – v3 bootstrap (files + workflows + installers)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr-branch:
+        description: "Nom de la branche pour la PR"
+        required: true
+        default: "release/v3-bootstrap"
+      pr-title:
+        description: "Titre de la PR"
+        required: true
+        default: "chore(v3): add orchestrate workflows + installers + Makefile"
+      pr-body:
+        description: "Description de la PR"
+        required: false
+        default: "Ajoute orchestrateur v3 (merge auto), menu d'installation (scripts/install.sh|.ps1), Makefile, finalize-v3-release.yml et maj README/notes."
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bootstrap-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Ensure folders
+        shell: bash
+        run: |
+          mkdir -p .github/workflows
+          mkdir -p scripts
+          mkdir -p docs/db
+
+      # -------------------------
+      # (A) Orchestrate v3 (merge branches -> release/v3)
+      # -------------------------
+      - name: Write .github/workflows/orchestrate-v3.yml
+        shell: bash
+        run: |
+          cat > .github/workflows/orchestrate-v3.yml <<'YAML'
+          name: Orchestrate v3 (merge all branches -> release/v3)
+
+          on:
+            workflow_dispatch:
+              inputs:
+                base:
+                  description: "Base branch"
+                  required: true
+                  default: "main"
+                release_branch:
+                  description: "Target integration branch"
+                  required: true
+                  default: "release/v3"
+                branches:
+                  description: "Branches to merge, comma-separated (merge order)"
+                  required: true
+                  default: "chore/ci-release-bootstrap,feat/api-sqlite-support,feat/api-sqlite-migrations,feat/api-sqlite-domain,feat/laravel-11-bootstrap,docs/sqlite-migrations"
+                version:
+                  description: "Target version"
+                  required: true
+                  default: "3.0.0"
+
+          permissions:
+            contents: write
+            pull-requests: write
+
+          jobs:
+            orchestrate:
+              runs-on: ubuntu-latest
+              steps:
+                - name: Checkout (full history)
+                  uses: actions/checkout@v4
+                  with:
+                    fetch-depth: 0
+
+                - name: Configure git
+                  run: |
+                    git config user.name "github-actions[bot]"
+                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                - name: Create or reset integration branch
+                  run: |
+                    BASE="${{ inputs.base }}"
+                    REL="${{ inputs.release_branch }}"
+                    git fetch origin "$BASE" --tags
+                    git checkout -B "$REL" "origin/$BASE"
+
+                - name: Merge branches (sequential)
+                  id: merge
+                  run: |
+                    IFS=',' read -ra BR <<< "${{ inputs.branches }}"
+                    for b in "${BR[@]}"; do
+                      btrim="$(echo "$b" | xargs)"
+                      echo "Merging $btrim ..."
+                      if git ls-remote --exit-code origin "refs/heads/$btrim" >/dev/null 2>&1; then
+                        git merge --no-ff --no-edit "origin/$btrim" || {
+                          echo "conflict=true" >> $GITHUB_OUTPUT
+                          exit 0
+                        }
+                      else
+                        echo "Branch $btrim not found on origin (skip)."
+                      fi
+                    done
+                    echo "conflict=false" >> $GITHUB_OUTPUT
+
+                - name: Mark PR with conflict label (if needed)
+                  if: steps.merge.outputs.conflict == 'true'
+                  run: |
+                    echo "::warning::Merge conflicts detected. Opening PR for manual resolution."
+                    touch .merge-conflicts.txt
+                    git add .merge-conflicts.txt
+                    git commit -m "chore(v3): mark conflicts for manual resolution"
+
+                - name: Bump VERSION and notes (only if no conflicts)
+                  if: steps.merge.outputs.conflict == 'false'
+                  run: |
+                    echo "${{ inputs.version }}" > VERSION
+                    if [ -f CHANGELOG.md ]; then
+                      sed -i "1i\\\n## [${{ inputs.version }}] - $(date +%Y-%m-%d)\n- Fusion branches vers v3\n- Menu d'installation (scripts/install.sh)\n- SQLite/MySQL compatibles (API+Laravel)\n" CHANGELOG.md
+                    else
+                      cat > CHANGELOG.md <<EOF
+          # Changelog
+
+          ## [${{ inputs.version }}] - $(date +%Y-%m-%d)
+          - Fusion branches vers v3
+          - Menu d'installation (scripts/install.sh)
+          - SQLite/MySQL compatibles (API+Laravel)
+          EOF
+                    fi
+                    if [ -f RELEASE-NOTES.md ]; then
+                      sed -i "1i\\\n## v${{ inputs.version }}\n- Voir docs/db/SQLITE-MIGRATIONS.md\n- Menu: scripts/install.sh\n" RELEASE-NOTES.md
+                    else
+                      cat > RELEASE-NOTES.md <<EOF
+          ## v${{ inputs.version }}
+          - Voir docs/db/SQLITE-MIGRATIONS.md
+          - Menu: scripts/install.sh
+          EOF
+                    fi
+                    git add VERSION CHANGELOG.md RELEASE-NOTES.md
+                    git commit -m "chore(v3): bump version to ${{ inputs.version }} + notes"
+
+                - name: Create PR release/v3 -> main
+                  uses: peter-evans/create-pull-request@v6
+                  with:
+                    branch: ${{ inputs.release_branch }}
+                    title: "release: v${{ inputs.version }} (merge branches)"
+                    body: |
+                      This PR merges all listed branches into **${{ inputs.release_branch }}** and prepares **v${{ inputs.version }}**.
+
+                      - Merge order: `${{ inputs.branches }}`
+                      - Version bump: `${{ inputs.version }}`
+                      - Added: `scripts/install.sh` (voir PR fichiers) si présent
+                      - Changelog & release notes mis à jour
+
+                      Si des **conflits** sont présents, un fichier `.merge-conflicts.txt` a été ajouté pour signalement ; merci de les résoudre puis de re-pousser.
+                    labels: ${{ steps.merge.outputs.conflict == 'true' && 'needs-conflict-resolution' || 'release' }}
+                    commit-message: "chore(v3): open integration PR for v${{ inputs.version }}"
+                    signoff: false
+                    delete-branch: false
+          YAML
+
+      # -------------------------
+      # (B) Finalize v3 Release (tagging)
+      # -------------------------
+      - name: Write .github/workflows/finalize-v3-release.yml
+        shell: bash
+        run: |
+          cat > .github/workflows/finalize-v3-release.yml <<'YAML'
+          name: Finalize v3 Release
+
+          on:
+            workflow_run:
+              workflows: ["Orchestrate v3 (merge all branches -> release/v3)"]
+              types: [completed]
+            workflow_dispatch:
+              inputs:
+                version:
+                  description: "Version (e.g. 3.0.0)"
+                  required: true
+                  default: "3.0.0"
+
+          permissions:
+            contents: write
+
+          jobs:
+            finalize:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                  with: { fetch-depth: 0 }
+                - name: Ensure version
+                  id: ver
+                  run: |
+                    V="${{ inputs.version }}"
+                    if [ -z "$V" ]; then
+                      if [ -f VERSION ]; then V="$(cat VERSION)"; else V="3.0.0"; fi
+                    fi
+                    echo "v=$V" >> $GITHUB_OUTPUT
+                - name: Create tag vX.Y.Z
+                  run: |
+                    V="${{ steps.ver.outputs.v }}"
+                    git tag "v$V" || true
+                    git push origin "v$V"
+                - name: (Optional) Trigger existing Release pipeline
+                  run: echo "Le pipeline release-demo.yml se lancera si configuré sur tags."
+          YAML
+
+      # -------------------------
+      # (C) Menu install.sh (Bash)
+      # -------------------------
+      - name: Write scripts/install.sh
+        shell: bash
+        run: |
+          cat > scripts/install.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          title="Nightwatch v3 — Menu d'installation"
+          info() { printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
+          warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+          err()  { printf "\033[1;31m[ERR]\033[0m %s\n"  "$*" >&2; }
+
+          choose() {
+            local prompt="$1"; shift
+            local options=("$@") i=1
+            echo "$prompt"
+            for opt in "${options[@]}"; do echo "  $i) $opt"; i=$((i+1)); done
+            read -rp "> " choice
+            if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#options[@]}" ]; then
+              err "Choix invalide."; exit 1
+            fi
+            echo "${options[$((choice-1))]}"
+          }
+
+          stack=$(choose "Installer :" "API Node" "Laravel (PHP)" "API Node + Laravel")
+          db=$(choose "Base de données :" "SQLite (recommandé en dev/CI)" "MySQL (service local ou distant)")
+
+          info "Vérification prérequis…"
+          command -v node >/dev/null || { err "NodeJS requis."; exit 1; }
+          command -v npm  >/dev/null || { err "npm requis."; exit 1; }
+          command -v php  >/dev/null && command -v composer >/dev/null || {
+            if [[ "$stack" =~ Laravel ]]; then err "PHP + Composer requis pour Laravel."; exit 1; fi
+          }
+
+          setup_api() {
+            info "Configuration API (apps/api)…"
+            pushd apps/api >/dev/null
+            if [ "$db" = "SQLite (recommandé en dev/CI)" ]; then
+              cp -f .env.sqlite.example .env || true
+              mkdir -p data
+              export DB_SQLITE_FILE=./data/dev.sqlite
+              npm run -s db:ensure-sqlite || true
+              npm run -s db:migrate:sqlite || true
+            else
+              cp -f .env.example .env || true
+              warn "Vérifie les variables MySQL dans apps/api/.env (DB_HOST, DB_NAME, DB_USER, DB_PASS)."
+              npm run -s db:migrate || true
+            fi
+            npm install --silent
+            npm run -s build
+            popd >/dev/null
+          }
+
+          setup_laravel() {
+            info "Configuration Laravel (apps/laravel-web)…"
+            pushd apps/laravel-web >/dev/null
+            cp -f .env.example .env || true
+            if [ "$db" = "SQLite (recommandé en dev/CI)" ]; then
+              cp -f .env.sqlite.example .env || true
+              touch database/database.sqlite
+            fi
+            composer install --no-interaction --prefer-dist
+            php artisan key:generate --force
+            php artisan migrate --force || true
+            npm install --silent
+            npm run -s build
+            popd >/dev/null
+          }
+
+          run_api()    { (cd apps/api && NODE_ENV=production PORT=8080 node dist/server.js & echo $! > .api.pid); }
+          run_laravel(){ (cd apps/laravel-web && php artisan serve --host 127.0.0.1 --port 8000 & echo $! > .laravel.pid); }
+
+          echo "=== $title ==="
+          case "$stack" in
+            "API Node")
+              setup_api
+              run_api
+              info "API → http://127.0.0.1:8080  (/health, /ready)"
+              ;;
+            "Laravel (PHP)")
+              setup_laravel
+              run_laravel
+              info "Laravel → http://127.0.0.1:8000  (/up, /health, /ready)"
+              ;;
+            "API Node + Laravel")
+              setup_api
+              setup_laravel
+              run_api
+              run_laravel
+              info "API   → http://127.0.0.1:8080  (/health, /ready)"
+              info "Laravel → http://127.0.0.1:8000  (/up, /health, /ready)"
+              ;;
+          esac
+
+          info "Terminé."
+          BASH
+
+      - name: Make install.sh executable
+        shell: bash
+        run: git update-index --chmod=+x scripts/install.sh
+
+      # -------------------------
+      # (D) Menu install.ps1 (Windows)
+      # -------------------------
+      - name: Write scripts/install.ps1
+        shell: bash
+        run: |
+          cat > scripts/install.ps1 <<'PS1'
+          param(
+            [ValidateSet("api","laravel","both")] [string]$stack = "both",
+            [ValidateSet("sqlite","mysql")]       [string]$db    = "sqlite"
+          )
+
+          function Info($m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
+          function Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
+          function Err ($m){ Write-Host "[ERR]  $m" -ForegroundColor Red }
+
+          function Setup-Api {
+            Info "Config API…"
+            Push-Location "apps/api"
+            if ($db -eq "sqlite") {
+              Copy-Item ".env.sqlite.example" ".env" -Force -ErrorAction SilentlyContinue
+              $env:DB_SQLITE_FILE = "./data/dev.sqlite"
+              npm run -s db:ensure-sqlite
+              npm run -s db:migrate:sqlite
+            } else {
+              Copy-Item ".env.example" ".env" -Force -ErrorAction SilentlyContinue
+              Warn "Vérifie DB_* dans apps/api/.env"
+              npm run -s db:migrate 2>$null
+            }
+            npm install --silent
+            npm run -s build
+            Pop-Location
+          }
+
+          function Setup-Laravel {
+            Info "Config Laravel…"
+            Push-Location "apps/laravel-web"
+            Copy-Item ".env.example" ".env" -Force -ErrorAction SilentlyContinue
+            if ($db -eq "sqlite") {
+              Copy-Item ".env.sqlite.example" ".env" -Force -ErrorAction SilentlyContinue
+              New-Item -ItemType File "database/database.sqlite" -Force | Out-Null
+            }
+            composer install --no-interaction --prefer-dist
+            php artisan key:generate --force
+            php artisan migrate --force
+            npm install --silent
+            npm run -s build
+            Pop-Location
+          }
+
+          switch ($stack) {
+            "api"     { Setup-Api }
+            "laravel" { Setup-Laravel }
+            "both"    { Setup-Api; Setup-Laravel }
+          }
+
+          Info "OK. API: http://127.0.0.1:8080  Laravel: http://127.0.0.1:8000"
+          PS1
+
+      # -------------------------
+      # (E) Makefile (raccourcis)
+      # -------------------------
+      - name: Write Makefile
+        shell: bash
+        run: |
+          cat > Makefile <<'MAKE'
+          .PHONY: install api laravel up clean
+
+          install:
+              ./scripts/install.sh
+
+          api:
+              cd apps/api && npm i && npm run build && NODE_ENV=production PORT=8080 node dist/server.js
+
+          laravel:
+              cd apps/laravel-web && composer install --no-interaction --prefer-dist && php artisan key:generate --force && php artisan migrate --force && php artisan serve --host 127.0.0.1 --port 8000
+
+          up: api laravel
+
+          clean:
+              find . -name "node_modules" -type d -prune -exec rm -rf {} \; || true
+          MAKE
+
+      # -------------------------
+      # (F) README quick start (append if not present)
+      # -------------------------
+      - name: Append Quick Start to README
+        shell: bash
+        run: |
+          if [ -f README.md ]; then
+            grep -qi "Démarrage rapide (v3)" README.md || cat >> README.md <<'MD'
+
+          ---
+          ## Démarrage rapide (v3)
+          ```bash
+          # Linux/macOS
+          chmod +x scripts/install.sh
+          ./scripts/install.sh
+          # Windows (PowerShell 7+)
+          pwsh -File scripts/install.ps1 -stack both -db sqlite
+          ```
+          - API (Node) : http://127.0.0.1:8080 (`/health`, `/ready`)
+          - Laravel : http://127.0.0.1:8000 (`/up`, `/health`, `/ready`)
+          MD
+          else
+            cat > README.md <<'MD'
+          # Nightwatch
+
+          ## Démarrage rapide (v3)
+          ```bash
+          chmod +x scripts/install.sh
+          ./scripts/install.sh
+          ```
+          - API (Node) : http://127.0.0.1:8080
+          - Laravel : http://127.0.0.1:8000
+          MD
+          fi
+
+      # -------------------------
+      # (G) Create Pull Request
+      # -------------------------
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ inputs.pr-branch }}
+          title:  ${{ inputs.pr-title }}
+          body:   ${{ inputs.pr-body }}
+          commit-message: "chore(v3): add orchestrate workflows + installers + Makefile + README quickstart"
+          signoff: false
+          delete-branch: false
